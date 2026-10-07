@@ -1,0 +1,56 @@
+name: Google Drive Connection Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-google-drive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get Google access token
+        shell: bash
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          HTTP_CODE=$(curl -sS -o /tmp/token.json -w "%{http_code}" \
+            -X POST https://oauth2.googleapis.com/token \
+            -d client_id="$GOOGLE_CLIENT_ID" \
+            -d client_secret="$GOOGLE_CLIENT_SECRET" \
+            -d refresh_token="$GOOGLE_REFRESH_TOKEN" \
+            -d grant_type=refresh_token)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Google OAuth token exchange failed. HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          ACCESS_TOKEN=$(jq -r '.access_token' /tmp/token.json)
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "Access token was not returned."
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
+
+      - name: Test Google Drive API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HTTP_CODE=$(curl -sS -o /tmp/drive.json -w "%{http_code}" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Google Drive API connection failed. HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Google Drive API connection successful."
