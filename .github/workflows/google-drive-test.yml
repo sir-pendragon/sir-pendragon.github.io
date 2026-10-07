@@ -37,6 +37,12 @@ jobs:
                   sys.exit(1)
               values[name] = value
 
+          expected_client_id = '141510413080-7bvhndnj3cmicch36v00fmbgnipnpm0s.apps.googleusercontent.com'
+          if values['GOOGLE_CLIENT_ID'] != expected_client_id:
+              print('::error::GOOGLE_CLIENT_ID does not match the confirmed OAuth client ID.')
+              sys.exit(1)
+          print('GOOGLE_CLIENT_ID matches the confirmed OAuth client.')
+
           def request_json(request, stage):
               try:
                   with urllib.request.urlopen(request, timeout=30) as response:
