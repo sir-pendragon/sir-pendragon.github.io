@@ -3,54 +3,79 @@ name: Google Drive Connection Test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test-google-drive:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 5
     steps:
-      - name: Get Google access token
-        shell: bash
+      - name: Test Google OAuth and Drive
+        shell: python
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: |
-          set -euo pipefail
+          import json
+          import os
+          import sys
+          import urllib.parse
+          import urllib.request
+          import urllib.error
 
-          HTTP_CODE=$(curl -sS -o /tmp/token.json -w "%{http_code}" \
-            -X POST https://oauth2.googleapis.com/token \
-            -d client_id="$GOOGLE_CLIENT_ID" \
-            -d client_secret="$GOOGLE_CLIENT_SECRET" \
-            -d refresh_token="$GOOGLE_REFRESH_TOKEN" \
-            -d grant_type=refresh_token)
+          names = ('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN')
+          values = {}
+          for name in names:
+              value = os.environ.get(name, '')
+              if not value:
+                  print(f'::error::{name} is missing or empty.')
+                  sys.exit(1)
+              if value != value.strip() or '\n' in value or '\r' in value:
+                  print(f'::error::{name} contains surrounding whitespace or a newline. Update that repository secret.')
+                  sys.exit(1)
+              values[name] = value
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "Google OAuth token exchange failed. HTTP $HTTP_CODE"
-            exit 1
-          fi
+          def request_json(request, stage):
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  try:
+                      payload = json.loads(error.read())
+                  except (ValueError, UnicodeError):
+                      payload = {}
+                  code = payload.get('error')
+                  allowed = {'invalid_client', 'invalid_grant', 'invalid_request',
+                             'unauthorized_client', 'unsupported_grant_type', 'invalid_scope'}
+                  safe_code = code if isinstance(code, str) and code in allowed else 'unclassified_error'
+                  print(f'::error::{stage} failed: HTTP {error.code}; code={safe_code}')
+                  if safe_code == 'invalid_client':
+                      print('Check GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET against the same active Google OAuth client.')
+                  elif safe_code == 'invalid_grant':
+                      print('The refresh token may be expired, revoked, or issued to a different OAuth client. Reauthorize using the configured client.')
+                  sys.exit(1)
+              except (urllib.error.URLError, TimeoutError, ValueError):
+                  print(f'::error::{stage} failed due to a network error or invalid response.')
+                  sys.exit(1)
 
-          ACCESS_TOKEN=$(jq -r '.access_token' /tmp/token.json)
-
-          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
-            echo "Access token was not returned."
-            exit 1
-          fi
-
-          echo "::add-mask::$ACCESS_TOKEN"
-          echo "ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
-
-      - name: Test Google Drive API
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          HTTP_CODE=$(curl -sS -o /tmp/drive.json -w "%{http_code}" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)")
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "Google Drive API connection failed. HTTP $HTTP_CODE"
-            exit 1
-          fi
-
-          echo "Google Drive API connection successful."
+          body = urllib.parse.urlencode({
+              'client_id': values['GOOGLE_CLIENT_ID'],
+              'client_secret': values['GOOGLE_CLIENT_SECRET'],
+              'refresh_token': values['GOOGLE_REFRESH_TOKEN'],
+              'grant_type': 'refresh_token',
+          }).encode()
+          result = request_json(urllib.request.Request(
+              'https://oauth2.googleapis.com/token', data=body,
+              headers={'Content-Type': 'application/x-www-form-urlencoded'}), 'Google OAuth')
+          token = result.get('access_token')
+          if not isinstance(token, str) or not token or any(c in token for c in '\r\n'):
+              print('::error::Google OAuth did not return a valid access token.')
+              sys.exit(1)
+          print(f'::add-mask::{token}')
+          print('Google OAuth token exchange successful.')
+          request_json(urllib.request.Request(
+              'https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)',
+              headers={'Authorization': f'Bearer {token}'}), 'Google Drive API')
+          print('Google Drive API connection successful.')
